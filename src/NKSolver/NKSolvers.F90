@@ -3,17 +3,9 @@ module NKSolver
   use constants
 
   ! MPI comes from constants, so we need to avoid MPIF_H in PETSc
-#include <petscversion.h>
-#if PETSC_VERSION_GE(3,8,0)
 #include <petsc/finclude/petsc.h>
   use petsc
   implicit none
-#else
-  implicit none
-#define PETSC_AVOID_MPIF_H
-#include "petsc/finclude/petsc.h"
-#include "petsc/finclude/petscvec.h90"
-#endif
 
   ! PETSc Matrices:
   ! dRdw: This is the actual matrix-free matrix computed with FD
@@ -320,7 +312,7 @@ contains
     end do spectralLoop4b
 
     ! Evaluate the residual now
-    call computeResidualNK()
+    call computeResidualNK(useUpdateIntermed = .True.)
     call getCurrentResidual(rhoRes, totalRRes)
 
     ! Put everything back
@@ -452,7 +444,7 @@ contains
     ! computeResidualNK subroutine
 
     call setW(wVec)
-    call computeResidualNK()
+    call computeResidualNK(useUpdateIntermed = .False.)
     call setRVec(rVec)
     ! We don't check an error here, so just pass back zero
     ierr = 0
@@ -540,7 +532,7 @@ contains
 
        ! Evaluate the residual before we start and put the residual in
        ! 'g', which is what would be the case after a linesearch.
-       call computeResidualNK()
+       call computeResidualNK(useUpdateIntermed = .False.)
        call setRVec(rVec)
        iter_k = 1
        iter_m = 0
@@ -726,7 +718,7 @@ contains
 
     ! Compute Function:
     call setW(w)
-    call computeResidualNK()
+    call computeResidualNK(useUpdateIntermed = .True.)
     call setRVec(g, flowRes2, turbRes2, gnorm)
 
     nfevals = nfevals + 1
@@ -769,7 +761,7 @@ contains
 
           ! Compute Function
           call setW(w)
-          call computeResidualNK()
+          call computeResidualNK(useUpdateIntermed = .True.)
           call setRVec(g, flowRes2, turbRes2, gnorm)
 
           nfevals = nfevals + 1
@@ -839,7 +831,7 @@ contains
 
     ! Compute new function again:
     call setW(w)
-    call computeResidualNK()
+    call computeResidualNK(useUpdateIntermed = .True.)
     call setRVec(g)
 
     nfevals = nfevals + 1
@@ -904,7 +896,7 @@ contains
 #endif
        ! Compute new function again:
        call setW(w)
-       call computeResidualNK()
+       call computeResidualNK(useUpdateIntermed = .True.)
        call setRVec(g)
        nfevals = nfevals + 1
 
@@ -951,7 +943,7 @@ contains
 
     ! Compute new function:
     call setW(w)
-    call computeResidualNK()
+    call computeResidualNK(useUpdateIntermed = .True.)
     call setRVec(g)
 
     nfevals = nfevals + 1
@@ -1024,7 +1016,7 @@ contains
 
        ! Compute Function @ new x (w is the work vector
        call setW(w)
-       call computeResidualNK()
+       call computeResidualNK(useUpdateIntermed = .True.)
        call setRVec(g)
        nfevals = nfevals + 1
 
@@ -1054,19 +1046,24 @@ contains
     step = alpha
   end subroutine LSNM
 
-  subroutine computeResidualNK()
+  subroutine computeResidualNK(useUpdateIntermed)
 
     use constants
     use blockette, only : blocketteRes
     implicit none
 
-    logical :: updateDt
+    logical, intent(in), optional :: useUpdateIntermed
+    logical :: updateIntermed
 
-    ! We want to update the time step
-    updateDt = .true.
+    ! Only update the time step if explicitly requested
+    updateIntermed = .false.
+
+    if (present(useUpdateIntermed)) then
+      updateIntermed = useUpdateIntermed
+    end if
 
     ! Shell function to maintain backward compatibility with code using computeResidualNK
-    call blocketteRes(useUpdateDT = updateDt)
+    call blocketteRes(useUpdateIntermed = updateIntermed)
 
   end subroutine computeResidualNK
 
@@ -1397,7 +1394,7 @@ contains
     integer(kind=intType) :: nn,i,j,k,l,counter,sps
     real(kind=realType) :: ovv
 
-    call computeResidualNK()
+    call computeResidualNK(useUpdateIntermed = .True.)
     counter = 0
     do nn=1,nDom
        do sps=1,nTimeIntervalsSpectral
@@ -1612,17 +1609,9 @@ end module NKSolver
 module ANKSolver
 
   use constants
-#include <petscversion.h>
-#if PETSC_VERSION_GE(3,8,0)
 #include <petsc/finclude/petsc.h>
   use petsc
   implicit none
-#else
-  implicit none
-#define PETSC_AVOID_MPIF_H
-#include "petsc/finclude/petsc.h"
-#include "petsc/finclude/petscvec.h90"
-#endif
 
   Mat  dRdw, dRdwPre
   Vec wVec, rVec, deltaW, baseRes
@@ -1691,6 +1680,7 @@ contains
     use communication, only : adflow_comm_world, myid
     use inputTimeSpectral, only : nTimeIntervalsSpectral
     use inputIteration, only : useLinResMonitor
+    use inputPhysics, only : equations
     use flowVarRefState, only : nw, viscous, nwf, nt1, nt2
     use ADjointVars , only: nCellsLocal
     use NKSolver, only : destroyNKSolver, linearResidualMonitor
@@ -1814,7 +1804,7 @@ contains
        ANK_useDissApprox = .False.
 
        ! Check if we need to set up the Turb KSP
-       if ((.not. ANK_coupled) .and. (.not. ANK_useTurbDADI)) then
+       if ((.not. ANK_coupled) .and. (.not. ANK_useTurbDADI) .and. equations==RANSEquations) then
            nStateTurb = nt2-nt1+1
 
            nDimWTurb = nStateTurb * nCellsLocal(1_intTYpe) * nTimeIntervalsSpectral
@@ -3062,11 +3052,11 @@ contains
     ! operations.
 
     ! wVec contains the state vector
-    call VecGetArrayReadF90(wVec,wvec_pointer,ierr)
+    call VecGetArrayF90(wVec,wvec_pointer,ierr)
     call EChk(ierr,__FILE__,__LINE__)
 
     ! deltaW contains the full update
-    call VecGetArrayReadF90(deltaW,dvec_pointer,ierr)
+    call VecGetArrayF90(deltaW,dvec_pointer,ierr)
     call EChk(ierr,__FILE__,__LINE__)
 
     if(.not. ANK_coupled) then
@@ -3161,10 +3151,10 @@ contains
 
     ! Restore the pointers to PETSc vectors
 
-    call VecRestoreArrayReadF90(wVec,wvec_pointer,ierr)
+    call VecRestoreArrayF90(wVec,wvec_pointer,ierr)
     call EChk(ierr,__FILE__,__LINE__)
 
-    call VecRestoreArrayReadF90(deltaW,dvec_pointer,ierr)
+    call VecRestoreArrayF90(deltaW,dvec_pointer,ierr)
     call EChk(ierr,__FILE__,__LINE__)
 
     ! Make sure that we did not get any NaN's in the process
@@ -3212,11 +3202,11 @@ contains
     ! operations.
 
     ! wVec contains the state vector
-    call VecGetArrayReadF90(wVecTurb,wvec_pointer,ierr)
+    call VecGetArrayF90(wVecTurb,wvec_pointer,ierr)
     call EChk(ierr,__FILE__,__LINE__)
 
     ! deltaW contains the full update
-    call VecGetArrayReadF90(deltaWTurb,dvec_pointer,ierr)
+    call VecGetArrayF90(deltaWTurb,dvec_pointer,ierr)
     call EChk(ierr,__FILE__,__LINE__)
 
     ii = 1
@@ -3270,10 +3260,10 @@ contains
 
     ! Restore the pointers to PETSc vectors
 
-    call VecRestoreArrayReadF90(wVecTurb,wvec_pointer,ierr)
+    call VecRestoreArrayF90(wVecTurb,wvec_pointer,ierr)
     call EChk(ierr,__FILE__,__LINE__)
 
-    call VecRestoreArrayReadF90(deltaWTurb,dvec_pointer,ierr)
+    call VecRestoreArrayF90(deltaWTurb,dvec_pointer,ierr)
     call EChk(ierr,__FILE__,__LINE__)
 
     ! Make sure that we did not get any NaN's in the process
@@ -3295,10 +3285,9 @@ contains
     use blockPointers, only : nDom, flowDoms
     use inputIteration, only : L2conv
     use inputTimeSpectral, only : nTimeIntervalsSpectral
-    use inputDiscretization, only : approxSA
+    use inputDiscretization, only : approxSA, orderturb
     use iteration, only : approxTotalIts, totalR0, totalR, currentLevel
     use utils, only : EChk, setPointers, myisnan
-    use turbMod, only : secondOrd
     use solverUtils, only : computeUTau
     use NKSolver, only : getEwTol
     use BCRoutines, only : applyAllBC, applyAllBC_block
@@ -3310,14 +3299,14 @@ contains
     implicit none
 
     ! Working Variables
-    integer(kind=intType) :: ierr, maxIt, kspIterations, nn, sps, reason, nHist, iter, feval
+    integer(kind=intType) :: ierr, maxIt, kspIterations, nn, sps, reason, nHist, iter, feval, orderturbsave
     integer(kind=intType) :: i,j,k,n
     real(kind=realType) :: atol, val, v2, factK, gm1
     real(kind=alwaysRealType) :: rtol, totalR_dummy, linearRes, norm
     real(kind=alwaysRealType) :: resHist(ANK_maxIter+1)
     real(kind=alwaysRealType) :: unsteadyNorm, unsteadyNorm_old
     real(kind=alwaysRealType) :: linResMonitorTurb, totalRTurb
-    logical :: secondOrdSave, correctForK, LSFailed
+    logical :: correctForK, LSFailed
 
     ! Calculate the residuals and set rVecTurb before the first iteration
     call blocketteRes(useFlowRes=.False.,useStoreWall=.False.)
@@ -3355,8 +3344,8 @@ contains
         if (totalR > ANK_secondOrdSwitchTol*totalR0) then
             ! Save if second order turbulence is used, we will only use 1st order during ANK (only matters for the coupled solver)
             approxSA = .True.
-            secondOrdSave = secondOrd
-            secondOrd =.False.
+            orderturbsave = orderturb
+            orderturb = firstOrder
 
             ! Determine the relative convergence for the KSP solver
             rtol = ANK_rtol ! Just use the input relative tolerance for approximate fluxes
@@ -3417,7 +3406,7 @@ contains
         ! Return previously changed variables back to normal, VERY IMPORTANT
         if (totalR > ANK_secondOrdSwitchTol*totalR0) then
             ! Replace the second order turbulence option
-            secondOrd = secondOrdSave
+            orderturb = orderturbsave
             approxSA = .False.
         end if
 
@@ -3564,11 +3553,10 @@ contains
     use inputPhysics, only : equations
     use inputIteration, only : L2conv
     use inputTimeSpectral, only : nTimeIntervalsSpectral
-    use inputDiscretization, only : lumpedDiss, approxSA
+    use inputDiscretization, only : lumpedDiss, approxSA, orderturb
     use iteration, only : approxTotalIts, totalR0, totalR, stepMonitor, linResMonitor, currentLevel, iterType
     use utils, only : EChk, setPointers, myisnan
-    use turbAPI, only : turbSolveSegregated
-    use turbMod, only : secondOrd
+    use turbAPI, only : turbSolveDDADI
     use solverUtils, only : computeUTau
     use adjointUtils, only : referenceShockSensor
     use NKSolver, only : setRVec, getEwTol
@@ -3587,13 +3575,13 @@ contains
     logical, intent(in) :: firstCall
 
     ! Working Variables
-    integer(kind=intType) :: ierr, maxIt, kspIterations, nn, sps, reason, nHist, iter, feval
+    integer(kind=intType) :: ierr, maxIt, kspIterations, nn, sps, reason, nHist, iter, feval, orderturbsave
     integer(kind=intType) :: i,j,k
     real(kind=realType) :: atol, val, v2, factK, gm1
     real(kind=alwaysRealType) :: rtol, totalR_dummy, linearRes, norm
     real(kind=alwaysRealType) :: resHist(ANK_maxIter+1)
     real(kind=alwaysRealType) :: unsteadyNorm, unsteadyNorm_old
-    logical :: secondOrdSave, correctForK, LSFailed
+    logical :: correctForK, LSFailed
 
     ! Enter this check if this is the first ANK step OR we are switching to the coupled ANK solver
     if (firstCall .or. &
@@ -3626,7 +3614,7 @@ contains
        call setwVecANK(wVec,1,nstate)
 
        ! Evaluate the residual before we start
-       call blocketteRes(useUpdateDt=.True.)
+       call blocketteRes(useUpdateIntermed=.True.)
        if (ANK_coupled) then
           call setRvec(rVec)
        else
@@ -3634,7 +3622,7 @@ contains
        end if
 
        ! Check if we are using the turb KSP
-       if ((.not. ANK_coupled) .and. (.not. ANK_useTurbDADI)) then
+       if ((.not. ANK_coupled) .and. (.not. ANK_useTurbDADI) .and. equations == RANSEquations) then
           call setwVecANK(wVecTurb,nt1,nt2)
           call setRVecANKTurb(rVecTurb)
        end if
@@ -3754,9 +3742,9 @@ contains
        lumpedDiss = .True.
        approxSA = .True.
 
-       ! Save if second order turbulence is used, we will only use 1st order during ANK (only matters for the coupled solver)
-       secondOrdSave = secondOrd
-       secondOrd =.False.
+       ! Save the turbulence order, we will only use 1st order during ANK (only matters for the coupled solver)
+       orderturbsave = orderturb
+       orderturb = firstOrder
 
        ! Calculate the shock sensor here because the approximate routines do not
        call referenceShockSensor()
@@ -3825,8 +3813,8 @@ contains
        lumpedDiss = .False.
        approxSA = .False.
 
-       ! Replace the second order turbulence option
-       secondOrd = secondOrdSave
+       ! Replace turbulence order
+       orderturb = orderturbsave
 
     end if
 
@@ -3938,7 +3926,7 @@ contains
         if (ANK_useTurbDADI) then
             ! actually do the turbulence update
             call computeUtau
-            call turbSolveSegregated
+            call turbSolveDDADI
         else
             call ANKTurbSolveKSP
         end if
@@ -3948,7 +3936,7 @@ contains
     ! also need the to update the update the time step and the
     ! viscWall pointer stuff
 
-    call blocketteRes(useUpdateDt=.True.)
+    call blocketteRes(useUpdateIntermed=.True.)
 
     feval = feval + 1
     if (ANK_coupled) then
